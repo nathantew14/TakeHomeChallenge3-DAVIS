@@ -50,10 +50,7 @@ def set_source(path, name=None):
 def schema():
     """Operation registry + default pipeline, minus the function objects."""
     ops = {
-        # fn_name lets the UI emit a runnable transcript without assuming the
-        # registry key matches the function it points at
-        key: {"label": spec["label"], "hint": spec["hint"], "params": spec["params"],
-              "fn_name": spec["fn"].__name__}
+        key: {"label": spec["label"], "hint": spec["hint"], "params": spec["params"]}
         for key, spec in pipeline.OPERATIONS.items()
     }
     return json.dumps({
@@ -122,12 +119,12 @@ def _recompute(active):
         reuse += 1
 
     del _cache[reuse:]
-    current = _cache[-1]["image"] if _cache else _source
+    current = _cache[-1]["state"] if _cache else pipeline.new_state(_source)
 
     for i in range(reuse, len(active)):
         op = active[i]
         error = None
-        before = current                      # the describer sees the input
+        before = current                      # the describer sees both ends
         started = time.perf_counter()
         try:
             current = pipeline.apply_op(current, op["type"], op.get("params"))
@@ -135,10 +132,11 @@ def _recompute(active):
             error = str(exc)
         _cache.append({
             "key": keys[i],
-            "image": current,
+            "state": current,
+            "image": current["image"],
             "type": op["type"],
             "error": error,
-            "detail": pipeline.describe_op(op["type"], op.get("params"), before),
+            "detail": pipeline.describe_op(op["type"], op.get("params"), before, current),
             "ms": (time.perf_counter() - started) * 1000,
         })
     return reuse

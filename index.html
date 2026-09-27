@@ -135,6 +135,17 @@
   }
   .seg button.on { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
 
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chips button {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 2px 9px; font-size: 11px; color: var(--muted);
+  }
+  .chips button:hover { border-color: var(--muted); }
+  .chips button[aria-pressed="true"] { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+  .chips .grp { flex-basis: 100%; font-size: 10px; color: var(--dim); margin-top: 3px;
+                text-transform: uppercase; letter-spacing: .06em; }
+  .chips .grp:first-child { margin-top: 0; }
+
   .blockerr { font: 11px var(--mono); color: var(--danger); padding: 0 10px 9px; }
   .blockdetail {
     font: 10.5px var(--mono); color: var(--muted); padding: 0 10px 9px;
@@ -385,13 +396,10 @@ function onReady(m) {
 function setBusy(text) { $("busy").textContent = text; $("busy").hidden = false; }
 function clearBusy() { $("busy").hidden = true; }
 
+// rebuild() fills every param from the spec, so a default block that lists
+// only some params (or none) still shows controls matching what it computes
 function defaultPipe() {
-  return SCHEMA.default_pipeline.map((op) => ({
-    uid: ++uidSeq,
-    type: op.type,
-    params: { ...op.params },
-    enabled: op.enabled !== false,
-  }));
+  return rebuild(SCHEMA.default_pipeline) || [];
 }
 
 function start(ops) {
@@ -430,6 +438,8 @@ function rebuild(saved) {
       const v = op.params ? op.params[p.key] : undefined;
       if (typeof v !== "number" || !isFinite(v)) {
         params[p.key] = p.default;              // param added or renamed since
+      } else if (p.multi) {
+        params[p.key] = Number.isInteger(v) && v >= 0 && v < (1 << p.multi.length) ? v : p.default;
       } else if (p.choices) {
         params[p.key] = v >= 0 && v < p.choices.length ? v : p.default;
       } else {
@@ -525,8 +535,14 @@ function blockEl(op, index) {
  * apply in Manual mode, Otsu's ratio only in Otsu. Hiding the inapplicable
  * ones beats showing dead controls. */
 function matches(value, want) {
+  if (want && typeof want === "object" && "bits" in want) return (Number(value) & want.bits) !== 0;
   return Array.isArray(want) ? want.some((w) => Number(w) === Number(value))
                              : Number(want) === Number(value);
+}
+
+// a param that other params' `when` refers to changes which controls belong
+function gates(op, key) {
+  return SCHEMA.operations[op.type].params.some((q) => q.when && key in q.when);
 }
 
 function visibleParams(spec, op) {
@@ -556,6 +572,42 @@ function controlEl(op, p, el) {
   const row = document.createElement("div");
   row.className = "row";
 
+  if (p.multi) {
+    const lab = document.createElement("div");
+    lab.className = "rlabel";
+    lab.innerHTML = `<span>${p.label}</span>`;
+    row.appendChild(lab);
+
+    // value is a bitmask over p.multi; p.groups (optional) labels runs of chips
+    const chips = document.createElement("div");
+    chips.className = "chips";
+    let lastGroup = null;
+    p.multi.forEach((name, bi) => {
+      const g = p.groups && p.groups[bi];
+      if (g && g !== lastGroup) {
+        const h = document.createElement("span");
+        h.className = "grp";
+        h.textContent = g;
+        chips.appendChild(h);
+        lastGroup = g;
+      }
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = name;
+      const bit = 1 << bi;
+      b.setAttribute("aria-pressed", String((op.params[p.key] & bit) !== 0));
+      b.onclick = () => {
+        op.params[p.key] ^= bit;
+        if (gates(op, p.key)) renderBody(op, el);
+        else b.setAttribute("aria-pressed", String((op.params[p.key] & bit) !== 0));
+        run();
+      };
+      chips.appendChild(b);
+    });
+    row.appendChild(chips);
+    return row;
+  }
+
   if (p.choices) {
     const lab = document.createElement("div");
     lab.className = "rlabel";
@@ -570,8 +622,7 @@ function controlEl(op, p, el) {
       if (Number(op.params[p.key]) === ci) b.classList.add("on");
       b.onclick = () => {
         op.params[p.key] = ci;
-        // a choice that gates other params changes which controls belong here
-        if (SCHEMA.operations[op.type].params.some((q) => q.when && p.key in q.when)) {
+        if (gates(op, p.key)) {
           renderBody(op, el);
         } else {
           seg.querySelectorAll("button").forEach((x) => x.classList.remove("on"));
@@ -940,8 +991,9 @@ function pipelineText() {
     // param, so the transcript stays an exact record of the call
     visibleParams(spec, op).forEach((p) => {
       const v = op.params[p.key];
-      const shown = p.choices ? p.choices[v]
-                              : Number(v).toFixed(decimals(p.step)) + (p.unit ? " " + p.unit : "");
+      const shown = p.multi ? (p.multi.filter((_, bi) => v & (1 << bi)).join(", ") || "none")
+                  : p.choices ? p.choices[v]
+                  : Number(v).toFixed(decimals(p.step)) + (p.unit ? " " + p.unit : "");
       out.push(`      ${pad(p.label, 22)}${shown}`);
     });
     if (st && st.error) out.push(`      !! ${st.error}`);
@@ -950,14 +1002,17 @@ function pipelineText() {
 
   out.push("Reproduce");
   out.push("---------");
+  // every param of every enabled block, so this is an exact record
   out.push("import cv2, pipeline");
-  out.push(`img = cv2.imread(${JSON.stringify(src.path)})`);
+  out.push("OPS = [");
   live.forEach((op) => {
-    const spec = SCHEMA.operations[op.type];
-    const args = spec.params.map((p) => `${p.key}=${op.params[p.key]}`).join(", ");
-    out.push(`img = pipeline.${spec.fn_name}(img${args ? ", " + args : ""})`);
+    const params = Object.fromEntries(SCHEMA.operations[op.type].params.map((p) => [p.key, op.params[p.key]]));
+    out.push(`    {"type": ${JSON.stringify(op.type)}, "params": ${JSON.stringify(params)}},`);
   });
-  out.push(`cv2.imwrite(${JSON.stringify(stem() + ".png")}, img)`);
+  out.push("]");
+  out.push(`stages = pipeline.run_pipeline(cv2.imread(${JSON.stringify(src.path)}), OPS)`);
+  out.push("final = stages[-1][\"state\"]   # image, labels, features, feature_names, ...");
+  out.push(`cv2.imwrite(${JSON.stringify(stem() + ".png")}, final["image"])`);
   out.push("");
   return out.join("\n");
 }
