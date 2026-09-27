@@ -181,6 +181,7 @@
   .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 7px; }
   .actions button { padding: 7px; font-size: 11.5px; }
   .actions .primary { border-color: var(--accent-dim); }
+  .actions .span { grid-column: 1 / -1; }
 
   /* ---------- viewer ---------- */
   .stagebar {
@@ -211,16 +212,6 @@
     box-shadow: 0 6px 34px #000a; border-radius: 2px;
     image-rendering: -webkit-optimize-contrast;
   }
-  .nav {
-    position: absolute; top: 50%; transform: translateY(-50%);
-    width: 38px; height: 62px; border: 1px solid var(--line);
-    background: #1b1e24d9; backdrop-filter: blur(6px);
-    border-radius: var(--radius); font-size: 17px; color: var(--muted);
-    display: flex; align-items: center; justify-content: center;
-  }
-  .nav:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
-  .nav:disabled { opacity: .22; cursor: default; }
-  .nav.prev { left: 14px; } .nav.next { right: 14px; }
 
   .film {
     flex: 0 0 auto; border-top: 1px solid var(--line);
@@ -259,10 +250,12 @@
       <div class="menu" id="menu" hidden></div>
       <button class="wide" id="addbtn">+ Add operation</button>
       <div class="actions">
-        <button class="wide" id="resetbtn" title="Back to defaults, and forget the saved pipeline">Reset</button>
+        <button class="wide" id="importtxt" title="Load the pipeline and image from a file saved by Export TXT">Import TXT</button>
+        <button class="wide" id="exporttxt" title="Write the pipeline and its parameters to a text file">Export TXT</button>
         <button class="wide primary" id="exportmask" title="Binary 0/255 mask at the source size, for evaluate.py">Export mask</button>
         <button class="wide" id="exportbtn" title="Whatever the last stage shows, as a PNG">Export PNG</button>
-        <button class="wide" id="exporttxt" title="Write the pipeline and its parameters to a text file">Export TXT</button>
+        <button class="wide span" id="resetbtn" title="Back to defaults, and forget the saved pipeline">Reset</button>
+        <input type="file" id="importfile" accept=".txt,text/plain" hidden>
       </div>
     </div>
   </aside>
@@ -278,9 +271,7 @@
     </div>
     <div class="stage" id="stage">
       <span class="busy" id="busy" hidden>processing…</span>
-      <button class="nav prev" id="prev" aria-label="Previous stage">&#10094;</button>
       <canvas id="view" aria-label="Pipeline stage output"></canvas>
-      <button class="nav next" id="next" aria-label="Next stage">&#10095;</button>
     </div>
     <div class="film" id="film"></div>
   </main>
@@ -361,14 +352,16 @@ function setSourceInfo(raw) {
 /* Swapping the image keeps the pipeline and invalidates every stage.  Runs
  * are held off until the worker has the new source, so nothing in flight can
  * paint the old image over the new one. */
-$("imgpick").onchange = () => {
-  const image = $("imgpick").value;
+$("imgpick").onchange = () => switchImage($("imgpick").value);
+
+function switchImage(image) {
+  $("imgpick").value = image;
   try { localStorage.setItem(IMAGE_KEY, image); } catch (err) { /* private mode */ }
   ready = false;
   $("imgpick").disabled = true;
   setBusy("loading image…");
   worker.postMessage({ cmd: "source", image });
-};
+}
 
 function onSource(m) {
   setSourceInfo(m.source);
@@ -910,8 +903,6 @@ function renderChrome() {
   $("smeta").textContent = `${st.width}×${st.height} · ${st.channels === 1 ? "1 ch" : "3 ch"}`
     + (st.detail ? ` · ${st.detail}` : "");
   $("scount").textContent = `${selected + 1} / ${stages.length}`;
-  $("prev").disabled = selected === 0;
-  $("next").disabled = selected === stages.length - 1;
 
   document.querySelectorAll(".frame").forEach((f, fi) => f.classList.toggle("on", fi === selected));
   document.querySelectorAll(".frame")[selected]?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -939,8 +930,6 @@ function renderFilm() {
   });
 }
 
-$("prev").onclick = () => showStage(selected - 1);
-$("next").onclick = () => showStage(selected + 1);
 
 document.addEventListener("keydown", (e) => {
   // let arrow keys nudge a focused slider instead of changing stage
@@ -1025,12 +1014,14 @@ function pipelineText() {
 
   out.push("Reproduce");
   out.push("---------");
-  // every param of every enabled block, so this is an exact record
+  // every param of every block, disabled ones included (run_pipeline skips
+  // them), so this is an exact record -- and what Import TXT reads back
   out.push("import cv2, pipeline");
   out.push("OPS = [");
-  live.forEach((op) => {
+  pipe.forEach((op) => {
     const params = Object.fromEntries(SCHEMA.operations[op.type].params.map((p) => [p.key, op.params[p.key]]));
-    out.push(`    {"type": ${JSON.stringify(op.type)}, "params": ${JSON.stringify(params)}},`);
+    out.push(`    {"type": ${JSON.stringify(op.type)}, "params": ${JSON.stringify(params)}, ` +
+             `"enabled": ${op.enabled ? "True" : "False"}},`);
   });
   out.push("]");
   out.push(`stages = pipeline.run_pipeline(cv2.imread(${JSON.stringify(src.path)}), OPS)`);
@@ -1064,6 +1055,61 @@ function download(blob, name) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/* Import reads back the Reproduce section of an Export TXT file: one
+ * block per line between `OPS = [` and `]`, each a Python dict literal that
+ * is also JSON once True/False are lowercased.  The image comes from the
+ * run_pipeline line.  Blocks go through rebuild(), so a file written by an
+ * older version -- renamed params, dropped ops, moved ranges -- still loads. */
+function parsePipelineText(text) {
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.trim() === "OPS = [");
+  if (at < 0) throw new Error("no OPS = [ ... ] block -- is this an Export TXT file?");
+  const ops = [];
+  for (let i = at + 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line === "]") break;
+    if (!line) continue;
+    const json = line.replace(/,$/, "").replace(/\bTrue\b/g, "true").replace(/\bFalse\b/g, "false");
+    try { ops.push(JSON.parse(json)); }
+    catch (err) { throw new Error(`line ${i + 1} is not a block: ${line.slice(0, 60)}`); }
+  }
+  const m = text.match(/run_pipeline\(cv2\.imread\("([^"]+)"\)/);
+  return { ops, image: m ? m[1] : null };
+}
+
+function importPipeline(text, filename) {
+  const { ops, image } = parsePipelineText(text);
+  const rebuilt = rebuild(ops);
+  if (!rebuilt) throw new Error("none of the blocks in that file exist any more");
+  const dropped = ops.length - rebuilt.length;
+
+  pipe = rebuilt;
+  followFinal = true;
+  renderBlocks();
+
+  const known = image && images.find((e) => e.image === image);
+  const note = [`imported ${filename}`];
+  if (dropped) note.push(`${dropped} unknown block${dropped > 1 ? "s" : ""} skipped`);
+  if (image && !known) note.push(`image ${image} not in manifest, kept current`);
+  if (known && image !== SCHEMA.source.path) switchImage(image);   // runs once loaded
+  else run();
+  setBusy(note.join(" · "));
+  setTimeout(clearBusy, 3000);
+}
+
+$("importtxt").onclick = () => { if (ready) $("importfile").click(); };
+$("importfile").onchange = async () => {
+  const file = $("importfile").files[0];
+  $("importfile").value = "";          // so picking the same file again still fires
+  if (!file) return;
+  try {
+    importPipeline(await file.text(), file.name);
+  } catch (err) {
+    console.error(err);
+    $("sname").textContent = `Import failed: ${err.message}`;
+  }
+};
 
 $("exporttxt").onclick = () => {
   if (!ready || !stages.length) return;
