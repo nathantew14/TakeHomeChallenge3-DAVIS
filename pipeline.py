@@ -21,7 +21,7 @@ that boundary.
 
 import cv2
 import numpy as np
-from scipy.ndimage import find_objects
+from scipy import ndimage
 from skimage.feature import local_binary_pattern
 from skimage.segmentation import find_boundaries, slic
 
@@ -224,7 +224,8 @@ def slic_superpixels(state, n_segments=200, compactness=10.0, smoothing=0, sigma
     else:
         flat = mean_colour(image, labels)
         shown = flat if display == 1 else draw_boundaries(flat, labels)
-    return new_state(shown, labels=labels, base=image)
+    return {**state, "image": shown, "labels": labels, "base": image,
+            "features": None, "clusters": None, "mask": None}
 
 
 def _describe_slic(p, before, after):
@@ -358,7 +359,7 @@ def _f_shape(image, labels):
     n = int(labels.max()) + 1
     area = np.bincount(labels.ravel(), minlength=n).astype(np.float64)
     aspect = np.zeros(n)
-    for r, sl in enumerate(find_objects(labels + 1, max_label=n)):
+    for r, sl in enumerate(ndimage.find_objects(labels + 1, max_label=n)):
         if sl is not None:
             aspect[r] = np.log((sl[1].stop - sl[1].start) / (sl[0].stop - sl[0].start))
     return np.stack([np.log(np.maximum(area, 1) / (h * w)), aspect], axis=1), ["log area", "log aspect"]
@@ -468,8 +469,8 @@ def extract_features(state, features=0b101001, w_colour=1.0, w_position=1.0,
         grey = _stretch(col).astype(np.uint8).reshape(-1, 1)
         region_bgr = cv2.applyColorMap(grey, cv2.COLORMAP_VIRIDIS).reshape(-1, 3)
     shown = draw_boundaries(region_bgr[labels], labels, _EDGE_BGR)
-    return new_state(shown, labels=labels, base=state["base"], features=X,
-                     feature_names=names, feature_groups=groups)
+    return {**state, "image": shown, "features": X, "feature_names": names,
+            "feature_groups": groups, "clusters": None, "mask": None}
 
 
 def _describe_features(p, before, after):
@@ -484,6 +485,225 @@ def _describe_features(p, before, after):
         i = int(p["feature_index"]) % X.shape[1]
         text += "  ·  showing #%d %s" % (i, after["feature_names"][i])
     return text
+
+
+# --------------------------------------------------------------------------
+# automated grouping: k-means on region features, then a foreground rule
+# --------------------------------------------------------------------------
+
+# BGR, with names so the readouts can say which colour is which cluster
+_CLUSTER_COLOURS = [
+    ("red", (60, 60, 230)), ("blue", (220, 130, 40)), ("green", (80, 190, 60)),
+    ("orange", (30, 150, 250)), ("purple", (190, 80, 150)), ("cyan", (220, 220, 60)),
+    ("yellow", (40, 225, 240)), ("pink", (190, 150, 250)), ("brown", (40, 80, 140)),
+    ("grey", (150, 150, 150)), ("lime", (90, 250, 180)), ("navy", (120, 40, 30)),
+]
+
+
+def _cluster_name(c):
+    return "c%d %s" % (c, _CLUSTER_COLOURS[c % len(_CLUSTER_COLOURS)][0])
+
+
+def _kmeans_pp(X, k, rng):
+    """k-means++ seeding: each new centre is drawn with probability
+    proportional to squared distance from the nearest existing one."""
+    centres = [X[rng.integers(len(X))]]
+    d2 = ((X - centres[0]) ** 2).sum(axis=1)
+    for _ in range(1, k):
+        total = d2.sum()
+        i = rng.choice(len(X), p=d2 / total) if total > 0 else rng.integers(len(X))
+        centres.append(X[i])
+        d2 = np.minimum(d2, ((X - X[i]) ** 2).sum(axis=1))
+    return np.array(centres)
+
+
+def kmeans(X, k=4, seed=0, n_init=10, max_iter=100):
+    """Lloyd's k-means with k-means++ seeding, best of n_init restarts.
+
+    Written out rather than using cv2.kmeans so the seed means the same thing
+    in the browser (OpenCV 4.11) and locally: numpy's default_rng is stable
+    across versions.  Clusters are renumbered largest-first, so c0 is always
+    the biggest group and the numbering does not shuffle between runs.
+
+    Returns (assignment (n,), inertia).
+    """
+    n = len(X)
+    k = max(1, min(int(k), n))
+    rng = np.random.default_rng(int(seed))
+    best, best_inertia = None, np.inf
+    for _ in range(max(1, int(n_init))):
+        C = _kmeans_pp(X, k, rng)
+        assign = None
+        for _ in range(max_iter):
+            d2 = ((X[:, None, :] - C[None, :, :]) ** 2).sum(axis=2)
+            new = d2.argmin(axis=1)
+            if assign is not None and np.array_equal(new, assign):
+                break
+            assign = new
+            for c in range(k):
+                members = X[assign == c]
+                # an emptied cluster restarts on the worst-fitted point
+                C[c] = members.mean(axis=0) if len(members) else X[d2.min(axis=1).argmax()]
+        inertia = float(((X - C[assign]) ** 2).sum())
+        if inertia < best_inertia - 1e-12:
+            best, best_inertia = assign, inertia
+    order = np.argsort(-np.bincount(best, minlength=k), kind="stable")
+    rank = np.empty(k, dtype=np.int64)
+    rank[order] = np.arange(k)
+    return rank[best], best_inertia
+
+
+def _paint_clusters(labels, clusters):
+    lut = np.array([c for _, c in _CLUSTER_COLOURS], dtype=np.uint8)
+    return lut[clusters % len(lut)][labels]
+
+
+def cluster_regions(state, k=4, seed=0, n_init=10, display=0):
+    """k-means over the region feature matrix; each superpixel gets a group.
+
+    display 0 = flat cluster colours, 1 = cluster colours blended over the
+    image SLIC segmented.
+    """
+    X = state.get("features")
+    if X is None:
+        raise ValueError("needs a Region Features block upstream")
+    clusters, inertia = kmeans(X, k, seed, n_init)
+    labels = state["labels"]
+    painted = _paint_clusters(labels, clusters)
+    if int(display) == 1:
+        painted = cv2.addWeighted(_bgr_of(state["base"]), 0.45, painted, 0.55, 0)
+    shown = draw_boundaries(painted, labels, _EDGE_BGR)
+    return {**state, "image": shown, "clusters": clusters, "inertia": inertia, "mask": None}
+
+
+def _describe_kmeans(p, before, after):
+    cl = after.get("clusters")
+    if cl is None:
+        return None
+    counts = np.bincount(cl)
+    parts = ", ".join("%s %d" % (_cluster_name(c), n) for c, n in enumerate(counts))
+    return "regions per cluster: %s  ·  inertia %.1f" % (parts, after["inertia"])
+
+
+def border_share(cluster_map):
+    """Fraction of the image's outer ring of pixels owned by each cluster."""
+    ring = _ring(cluster_map)
+    return np.bincount(ring, minlength=int(cluster_map.max()) + 1) / ring.size
+
+
+def _largest_blob(mask):
+    lab, n = ndimage.label(mask, structure=np.ones((3, 3)))
+    if n <= 1:
+        return mask
+    sizes = np.bincount(lab.ravel())
+    sizes[0] = 0
+    return lab == sizes.argmax()
+
+
+def _ring(a):
+    """The image's outer ring of pixels, as a flat array."""
+    return np.concatenate([a[0], a[-1], a[1:-1, 0], a[1:-1, -1]])
+
+
+def _pick_by_border(share, area, max_contact, min_area):
+    """Candidates owning <= max_contact of the border and >= min_area of the
+    image; failing that, the one sizeable candidate with the least contact."""
+    ids = range(len(share))
+    picked = [i for i in ids if share[i] <= max_contact and area[i] >= min_area]
+    if picked:
+        return picked, False
+    big = [i for i in ids if area[i] >= min_area] or list(ids)
+    return [min(big, key=lambda i: share[i])], True
+
+
+def foreground_mask(state, unit=0, max_contact=0.05, min_area=0.01, connectivity=1,
+                    fill_holes=1, display=0):
+    """Assign clusters to foreground and merge them into one binary mask.
+
+    Border contact: background tends to wrap around the frame, the
+    subject tends not to.  unit 0 scores whole clusters; unit 1 first splits
+    every cluster into 8-connected blobs and scores each blob, so a cluster
+    that is subject in the middle and background at the edge can still
+    contribute its middle.  A unit is foreground if it owns at most
+    `max_contact` of the image border and covers at least `min_area` of the
+    image (so specks do not count).  If none qualifies, the single unit with
+    the least border contact is taken instead, and the readout says so.
+
+    Then optionally keep only the largest 8-connected blob and fill holes.
+    The mask is resized to the source size with nearest-neighbour, so it can
+    be scored directly even if the pipeline downscaled.
+
+    display 0 = cutout (source pixels inside the mask), 1 = mask,
+    2 = overlay on the source.
+    """
+    clusters = state.get("clusters")
+    if clusters is None:
+        raise ValueError("needs a K-means block upstream")
+    cmap = clusters[state["labels"]]
+    k = int(clusters.max()) + 1
+    share = border_share(cmap)
+    area = np.bincount(cmap.ravel(), minlength=k) / cmap.size
+
+    if int(unit) == 0:
+        fg, fallback = _pick_by_border(share, area, float(max_contact), float(min_area))
+        mask = np.isin(cmap, fg)
+        n_units = k
+    else:
+        # one global id per (cluster, blob): offset each cluster's blob ids
+        blobs = np.zeros(cmap.shape, dtype=np.int64)
+        owner, offset = [], 0
+        for c in range(k):
+            lab, n = ndimage.label(cmap == c, structure=np.ones((3, 3)))
+            blobs[lab > 0] = lab[lab > 0] - 1 + offset
+            owner += [c] * n
+            offset += n
+        n_units = offset
+        b_share = np.bincount(_ring(blobs), minlength=n_units) / _ring(blobs).size
+        b_area = np.bincount(blobs.ravel(), minlength=n_units) / blobs.size
+        picked, fallback = _pick_by_border(b_share, b_area, float(max_contact), float(min_area))
+        mask = np.isin(blobs, picked)
+        fg = sorted({owner[b] for b in picked})
+
+    if int(connectivity) == 1:
+        mask = _largest_blob(mask)
+    if int(fill_holes) == 1:
+        mask = ndimage.binary_fill_holes(mask)
+    mask = mask.astype(np.uint8) * 255
+
+    source = state["source"]
+    sh, sw = source.shape[:2]
+    if mask.shape != (sh, sw):
+        mask = cv2.resize(mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
+
+    src = _bgr_of(source)
+    display = int(display)
+    if display == 1:
+        shown = mask
+    elif display == 0:
+        shown = np.where(mask[..., None] > 0, src, (src * 0.12).astype(np.uint8))
+    else:
+        tint = src.copy()
+        tint[mask > 0] = (0.5 * tint[mask > 0] + 0.5 * np.array((255, 80, 200))).astype(np.uint8)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        cv2.drawContours(tint, contours, -1, (255, 255, 255), 1)
+        shown = tint
+
+    info = {"share": share, "area": area, "fg": fg, "fallback": fallback,
+            "unit": int(unit), "n_units": n_units, "coverage": float((mask > 0).mean())}
+    return {**state, "image": shown, "mask": mask, "mask_info": info}
+
+
+def _describe_foreground(p, before, after):
+    info = after.get("mask_info")
+    if after.get("mask") is None or info is None:
+        return None
+    borders = ", ".join("%s %.0f%%" % (_cluster_name(c), 100 * s) for c, s in enumerate(info["share"]))
+    fg = "+".join(_cluster_name(c) for c in info["fg"])
+    note = "  ·  none under threshold, took least-contact" if info["fallback"] else ""
+    if info["unit"] == 1:
+        return "%d blobs scored  →  fg from %s  ·  mask %.1f%% of image%s" % (
+            info["n_units"], fg, 100 * info["coverage"], note)
+    return "border: %s  →  fg %s  ·  mask %.1f%% of image%s" % (borders, fg, 100 * info["coverage"], note)
 
 
 def _describe_gaussian(p, before, after):
@@ -547,6 +767,34 @@ OPERATIONS = {
             _weight("shape"),
             {"key": "display", "label": "Show", "choices": ["PCA → RGB", "One feature"], "default": 0},
             {"key": "feature_index", "label": "Feature #", "min": 0, "max": 40, "step": 1, "default": 0, "when": {"display": 1}},
+        ],
+    },
+    "kmeans": {
+        "label": "K-means Clustering",
+        "hint": "Groups superpixels by their feature vectors. k-means++ seeding, best of n restarts; clusters numbered largest-first.",
+        "fn": cluster_regions,
+        "state": True,
+        "describe": _describe_kmeans,
+        "params": [
+            {"key": "k", "label": "Clusters (k)", "min": 2, "max": 12, "step": 1, "default": 4},
+            {"key": "seed", "label": "Random seed", "min": 0, "max": 99, "step": 1, "default": 0},
+            {"key": "n_init", "label": "Restarts", "min": 1, "max": 30, "step": 1, "default": 10},
+            {"key": "display", "label": "Show", "choices": ["Clusters", "Over image"], "default": 1},
+        ],
+    },
+    "foreground": {
+        "label": "Foreground Rule",
+        "hint": "Border contact: clusters (or their connected blobs) owning little of the image border are foreground. Mask is resized to the source size.",
+        "fn": foreground_mask,
+        "state": True,
+        "describe": _describe_foreground,
+        "params": [
+            {"key": "unit", "label": "Score per", "choices": ["Cluster", "Connected blob"], "default": 0},
+            {"key": "max_contact", "label": "Max border share", "min": 0, "max": 0.5, "step": 0.01, "default": 0.05},
+            {"key": "min_area", "label": "Min cluster area", "min": 0, "max": 0.2, "step": 0.005, "default": 0.01},
+            {"key": "connectivity", "label": "Keep", "choices": ["All regions", "Largest blob"], "default": 1},
+            {"key": "fill_holes", "label": "Fill holes", "choices": ["Off", "On"], "default": 1},
+            {"key": "display", "label": "Show", "choices": ["Cutout", "Mask", "Overlay"], "default": 0},
         ],
     },
     "downscale": {
@@ -631,6 +879,8 @@ DEFAULT_PIPELINE = [
                                 "colour_space": 0, "max_iter": 10, "enforce_connectivity": 1,
                                 "display": 0}, "enabled": True},
     {"type": "features", "params": {}, "enabled": True},
+    {"type": "kmeans", "params": {}, "enabled": True},
+    {"type": "foreground", "params": {}, "enabled": True},
 ]
 
 
@@ -638,10 +888,13 @@ DEFAULT_PIPELINE = [
 # running
 # --------------------------------------------------------------------------
 
-def new_state(image, labels=None, base=None, features=None, feature_names=None,
-              feature_groups=None):
-    return {"image": image, "labels": labels, "base": base, "features": features,
-            "feature_names": feature_names, "feature_groups": feature_groups}
+def new_state(image, source=None):
+    """A state with nothing computed yet.   is the original image,
+    kept so the final mask can be mapped back to its size."""
+    return {"image": image, "source": image if source is None else source,
+            "labels": None, "base": None, "features": None, "feature_names": None,
+            "feature_groups": None, "clusters": None, "inertia": None,
+            "mask": None, "mask_info": None}
 
 
 def defaults_for(op_type):
@@ -686,7 +939,7 @@ def apply_op(state, op_type, params):
         return spec["fn"](state, **p)
     image = spec["fn"](state["image"], **p)
     if image.shape[:2] != state["image"].shape[:2]:
-        return new_state(image)
+        return new_state(image, state["source"])
     return {**state, "image": image}
 
 

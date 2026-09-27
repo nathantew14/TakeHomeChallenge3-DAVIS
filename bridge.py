@@ -239,3 +239,18 @@ def export_png(ops_json):
     if not ok:
         raise RuntimeError("PNG encode failed")
     return np.ascontiguousarray(buf.reshape(-1))
+
+
+def export_mask_png(ops_json):
+    """The last binary mask the pipeline produced, as a single-channel 0/255
+    PNG at the source size -- the format evaluate.py accepts."""
+    ops = json.loads(ops_json)
+    stages = pipeline.run_pipeline(_source, ops)
+    mask = next((st["state"]["mask"] for st in reversed(stages)
+                 if st["state"].get("mask") is not None), None)
+    if mask is None:
+        raise RuntimeError("no mask yet -- add a Foreground Rule block")
+    ok, buf = cv2.imencode(".png", mask)
+    if not ok:
+        raise RuntimeError("PNG encode failed")
+    return np.ascontiguousarray(buf.reshape(-1))

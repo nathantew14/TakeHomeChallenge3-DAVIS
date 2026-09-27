@@ -6,12 +6,12 @@
  *   in   {cmd:'init',   image}
  *        {cmd:'source', image}
  *        {cmd:'run',    id, ops, selected, all}
- *        {cmd:'export', id, ops}
+ *        {cmd:'export', id, ops, kind}      kind 'image' (default) or 'mask'
  *   out  {type:'status', text}
  *        {type:'ready',  schema, source}
  *        {type:'source', source}
  *        {type:'result', id, meta, preview, thumbs}
- *        {type:'png',    id, data}
+ *        {type:'png',    id, data, kind}
  *        {type:'error',  id, message}
  */
 
@@ -99,9 +99,10 @@ function handleRun({ id, ops, selected, all }) {
               [preview.data, ...thumbs.map((t) => t.data)]);
 }
 
-function handleExport({ id, ops }) {
-  const data = takeBuffer(bridge.export_png(JSON.stringify(ops)));
-  postMessage({ type: "png", id, data }, [data]);
+function handleExport({ id, ops, kind = "image" }) {
+  const fn = kind === "mask" ? bridge.export_mask_png : bridge.export_png;
+  const data = takeBuffer(fn(JSON.stringify(ops)));
+  postMessage({ type: "png", id, data, kind }, [data]);
 }
 
 onmessage = async (e) => {
