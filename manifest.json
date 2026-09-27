@@ -1,0 +1,122 @@
+[
+  {
+    "sequence": "bear",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.12,
+    "image": "images/bear__00000.jpg",
+    "mask": "masks/bear__00000.png",
+    "original_annotation": "original_annotations/bear__00000.png",
+    "image_sha256": "ee09a661bee164751c0866c65680ab66067abfdecc14d1b1dea0eca8c0ce1b67",
+    "annotation_sha256": "2f9dfc83f318ddfe2bfc15649508ba0b080d20f699e39c6e2adf693a989d5914"
+  },
+  {
+    "sequence": "blackswan",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.1009,
+    "image": "images/blackswan__00000.jpg",
+    "mask": "masks/blackswan__00000.png",
+    "original_annotation": "original_annotations/blackswan__00000.png",
+    "image_sha256": "f134391f3c757dd305e79f1fb3a3e6b0ec441013394f2e620d3cfe6b887a02c4",
+    "annotation_sha256": "5bbf884ceedf9415c0411361346dda02285cc359a1ab42f1b84586196eb17dcc"
+  },
+  {
+    "sequence": "bus",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.1866,
+    "image": "images/bus__00000.jpg",
+    "mask": "masks/bus__00000.png",
+    "original_annotation": "original_annotations/bus__00000.png",
+    "image_sha256": "aa7ba6a7b5906cbecf19ccb4bc9755a54f8ee6da10eef1418347b869079fb739",
+    "annotation_sha256": "b805a1b82c74b7922908c06545877020d82f3a9d65f077c7dea3773492b18b00"
+  },
+  {
+    "sequence": "camel",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.1711,
+    "image": "images/camel__00000.jpg",
+    "mask": "masks/camel__00000.png",
+    "original_annotation": "original_annotations/camel__00000.png",
+    "image_sha256": "caf4f65c214e0b937e047c44af7f39d0aef2b970a3b48134db8920ad3b3e3ec5",
+    "annotation_sha256": "e0f674fd93a25a5e7ae85b80c92647672ceffc47eaa766447b4c089a9338ee78"
+  },
+  {
+    "sequence": "car-roundabout",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.1413,
+    "image": "images/car-roundabout__00000.jpg",
+    "mask": "masks/car-roundabout__00000.png",
+    "original_annotation": "original_annotations/car-roundabout__00000.png",
+    "image_sha256": "fee22e5cbf368f7b24d89217ef792cb2d3810dd8654d445009fa672074a9426f",
+    "annotation_sha256": "5fd167ca48b0113b59b3c465bddf7723e73254e80cb1de83386b655ed8be0526"
+  },
+  {
+    "sequence": "cows",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.144,
+    "image": "images/cows__00000.jpg",
+    "mask": "masks/cows__00000.png",
+    "original_annotation": "original_annotations/cows__00000.png",
+    "image_sha256": "a9354bbee4c9eb396c1a86222406e8f279dc755355d13b9bb93b8c95b15e2c4d",
+    "annotation_sha256": "41706b053bca7415724bc82608f7ba9f4a1732713a5eb35575fa4d875160c767"
+  },
+  {
+    "sequence": "dance-twirl",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.0553,
+    "image": "images/dance-twirl__00000.jpg",
+    "mask": "masks/dance-twirl__00000.png",
+    "original_annotation": "original_annotations/dance-twirl__00000.png",
+    "image_sha256": "f708e1cfee79cc2e8855095b9e320ba0bb8d97d7887c9b1f7e8987d4c7035d2d",
+    "annotation_sha256": "8058ecee30c8b777d8a62eb59e9a2b56d06dd118c70cbf908be5a7e67b4afdbb"
+  },
+  {
+    "sequence": "dog",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.1073,
+    "image": "images/dog__00000.jpg",
+    "mask": "masks/dog__00000.png",
+    "original_annotation": "original_annotations/dog__00000.png",
+    "image_sha256": "8055f6d7600ba9acd7dba5faa6ac3b1487bcfdc3b4c45e4519d2c0953c8f1bb5",
+    "annotation_sha256": "c12419f9564495aa6671b519b106337a0addad9ac8f88751ee1077aa5f77b577"
+  },
+  {
+    "sequence": "goat",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.0877,
+    "image": "images/goat__00000.jpg",
+    "mask": "masks/goat__00000.png",
+    "original_annotation": "original_annotations/goat__00000.png",
+    "image_sha256": "b7ed4011423a63d0d6691ceb90e8e4146d35812fd19eb82385275757f8f443cf",
+    "annotation_sha256": "5c3d9745133f269685342c66e88563526a4baf07cb86abb21f5ba01f1ec14c7b"
+  },
+  {
+    "sequence": "tennis",
+    "frame": "00000",
+    "width": 854,
+    "height": 480,
+    "foreground_fraction": 0.0317,
+    "image": "images/tennis__00000.jpg",
+    "mask": "masks/tennis__00000.png",
+    "original_annotation": "original_annotations/tennis__00000.png",
+    "image_sha256": "037d0d18c97b741bd45454a3be830425389fcd62c715dbd6670ba5298b72f5f6",
+    "annotation_sha256": "176b3df6d06144421b5c986462ffd996ee7f7a956c5e569def6063be6ed7f3c1"
+  }
+]
