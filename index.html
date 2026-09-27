@@ -135,16 +135,14 @@
   }
   .seg button.on { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
 
-  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
-  .chips button {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-    padding: 2px 9px; font-size: 11px; color: var(--muted);
+  .ghead {
+    font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em;
+    margin: 12px 0 5px; padding-top: 7px; border-top: 1px solid var(--line-soft);
   }
-  .chips button:hover { border-color: var(--muted); }
-  .chips button[aria-pressed="true"] { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
-  .chips .grp { flex-basis: 100%; font-size: 10px; color: var(--dim); margin-top: 3px;
-                text-transform: uppercase; letter-spacing: .06em; }
-  .chips .grp:first-child { margin-top: 0; }
+  .row.off .rlabel span:first-child { color: var(--dim); }
+  .row.off .val { color: var(--dim); }
+  .row.mapped .rlabel span:first-child { color: var(--accent); }
+  .row.mapped .rlabel span:first-child::after { content: "  ◉ mapped"; font-size: 10px; }
 
   .blockerr { font: 11px var(--mono); color: var(--danger); padding: 0 10px 9px; }
   .blockdetail {
@@ -440,8 +438,6 @@ function rebuild(saved) {
       const v = op.params ? op.params[p.key] : undefined;
       if (typeof v !== "number" || !isFinite(v)) {
         params[p.key] = p.default;              // param added or renamed since
-      } else if (p.multi) {
-        params[p.key] = Number.isInteger(v) && v >= 0 && v < (1 << p.multi.length) ? v : p.default;
       } else if (p.choices) {
         params[p.key] = v >= 0 && v < p.choices.length ? v : p.default;
       } else {
@@ -533,11 +529,10 @@ function blockEl(op, index) {
   return el;
 }
 
-/* A param may declare `when: {key: value}` -- Canny's manual thresholds only
- * apply in Manual mode, Otsu's ratio only in Otsu. Hiding the inapplicable
- * ones beats showing dead controls. */
+/* A param may declare `when: {key: value}` -- SLIC's sigma only applies with
+ * smoothing on. Hiding the inapplicable ones beats showing dead controls.
+ * `hidden` params are driven by other controls and never drawn. */
 function matches(value, want) {
-  if (want && typeof want === "object" && "bits" in want) return (Number(value) & want.bits) !== 0;
   return Array.isArray(want) ? want.some((w) => Number(w) === Number(value))
                              : Number(want) === Number(value);
 }
@@ -548,8 +543,8 @@ function gates(op, key) {
 }
 
 function visibleParams(spec, op) {
-  return spec.params.filter((p) => !p.when ||
-    Object.keys(p.when).every((k) => matches(op.params[k], p.when[k])));
+  return spec.params.filter((p) => !p.hidden && (!p.when ||
+    Object.keys(p.when).every((k) => matches(op.params[k], p.when[k]))));
 }
 
 function renderBody(op, el) {
@@ -562,7 +557,45 @@ function renderBody(op, el) {
     h.textContent = spec.hint;
     body.appendChild(h);
   }
-  visibleParams(spec, op).forEach((p) => body.appendChild(controlEl(op, p, el)));
+  let group = null;
+  visibleParams(spec, op).forEach((p) => {
+    if (p.group && p.group !== group) {
+      const g = document.createElement("div");
+      g.className = "ghead";
+      g.textContent = p.group;
+      body.appendChild(g);
+    }
+    group = p.group || null;
+    body.appendChild(controlEl(op, p, el));
+  });
+  markMapped(op, el);
+}
+
+/* `on_touch` params (feature weights) set other params when pressed or
+ * dragged -- here, switch the view to that feature's map.  The body is not
+ * re-rendered, since that would replace the slider mid-drag; the affected
+ * choice buttons are updated in place instead. */
+function applyTouch(op, p, el) {
+  if (!p.on_touch) return;
+  Object.assign(op.params, p.on_touch);
+  Object.entries(p.on_touch).forEach(([key, value]) => {
+    el.querySelectorAll(`.row[data-key="${key}"] .seg button`).forEach((b, bi) => {
+      b.classList.toggle("on", bi === Number(value));
+    });
+  });
+  markMapped(op, el);
+}
+
+// Highlight the weight whose map is on screen. The pairing is read from the
+// params' own on_touch specs rather than assumed.
+function markMapped(op, el) {
+  SCHEMA.operations[op.type].params.forEach((p) => {
+    if (!p.on_touch) return;
+    const row = el.querySelector(`.row[data-key="${p.key}"]`);
+    if (!row) return;
+    const on = Object.entries(p.on_touch).every(([k, v]) => Number(op.params[k]) === Number(v));
+    row.classList.toggle("mapped", on);
+  });
 }
 
 function decimals(step) {
@@ -573,42 +606,7 @@ function decimals(step) {
 function controlEl(op, p, el) {
   const row = document.createElement("div");
   row.className = "row";
-
-  if (p.multi) {
-    const lab = document.createElement("div");
-    lab.className = "rlabel";
-    lab.innerHTML = `<span>${p.label}</span>`;
-    row.appendChild(lab);
-
-    // value is a bitmask over p.multi; p.groups (optional) labels runs of chips
-    const chips = document.createElement("div");
-    chips.className = "chips";
-    let lastGroup = null;
-    p.multi.forEach((name, bi) => {
-      const g = p.groups && p.groups[bi];
-      if (g && g !== lastGroup) {
-        const h = document.createElement("span");
-        h.className = "grp";
-        h.textContent = g;
-        chips.appendChild(h);
-        lastGroup = g;
-      }
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = name;
-      const bit = 1 << bi;
-      b.setAttribute("aria-pressed", String((op.params[p.key] & bit) !== 0));
-      b.onclick = () => {
-        op.params[p.key] ^= bit;
-        if (gates(op, p.key)) renderBody(op, el);
-        else b.setAttribute("aria-pressed", String((op.params[p.key] & bit) !== 0));
-        run();
-      };
-      chips.appendChild(b);
-    });
-    row.appendChild(chips);
-    return row;
-  }
+  row.dataset.key = p.key;
 
   if (p.choices) {
     const lab = document.createElement("div");
@@ -629,6 +627,7 @@ function controlEl(op, p, el) {
         } else {
           seg.querySelectorAll("button").forEach((x) => x.classList.remove("on"));
           b.classList.add("on");
+          markMapped(op, el);
         }
         run();
       };
@@ -647,7 +646,11 @@ function controlEl(op, p, el) {
   val.className = "val";
 
   const cur = op.params[p.key] ?? p.default;
-  const show = (v) => { val.textContent = Number(v).toFixed(dp) + (p.unit ? " " + p.unit : ""); };
+  // a weight at 0 is a feature switched off; grey it so the live ones stand out
+  const show = (v) => {
+    val.textContent = Number(v).toFixed(dp) + (p.unit ? " " + p.unit : "");
+    if (p.on_touch) row.classList.toggle("off", Number(v) <= 0);
+  };
   show(cur);
   lab.append(name, val);
   row.appendChild(lab);
@@ -659,8 +662,11 @@ function controlEl(op, p, el) {
     const v = p.step % 1 === 0 ? parseInt(slider.value, 10) : parseFloat(slider.value);
     op.params[p.key] = v;
     show(v);
+    applyTouch(op, p, el);
     run();
   };
+  // pressing without moving still counts as touching: show the map
+  if (p.on_touch) slider.addEventListener("pointerdown", () => { applyTouch(op, p, el); run(); });
   row.appendChild(slider);
   return row;
 }
@@ -1009,8 +1015,7 @@ function pipelineText() {
     // param, so the transcript stays an exact record of the call
     visibleParams(spec, op).forEach((p) => {
       const v = op.params[p.key];
-      const shown = p.multi ? (p.multi.filter((_, bi) => v & (1 << bi)).join(", ") || "none")
-                  : p.choices ? p.choices[v]
+      const shown = p.choices ? p.choices[v]
                   : Number(v).toFixed(decimals(p.step)) + (p.unit ? " " + p.unit : "");
       out.push(`      ${pad(p.label, 22)}${shown}`);
     });

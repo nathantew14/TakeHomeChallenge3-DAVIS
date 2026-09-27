@@ -255,13 +255,22 @@ def _bgr_of(image):
     return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image
 
 
-def _f_lab_mean(image, labels):
-    lab = cv2.cvtColor(_bgr_of(image), cv2.COLOR_BGR2LAB)
-    return _region_means(labels, lab), ["L mean", "a mean", "b mean"]
+def _lab(image):
+    return cv2.cvtColor(_bgr_of(image), cv2.COLOR_BGR2LAB).astype(np.float64)
+
+
+def _f_lightness(image, labels):
+    return _region_means(labels, _lab(image)[..., 0]), ["L mean"]
+
+
+def _f_chroma(image, labels):
+    """a and b: colour with brightness taken out, so a shadowed and a sunlit
+    patch of the same fur stay close."""
+    return _region_means(labels, _lab(image)[..., 1:]), ["a mean", "b mean"]
 
 
 def _f_lab_std(image, labels):
-    lab = cv2.cvtColor(_bgr_of(image), cv2.COLOR_BGR2LAB).astype(np.float64)
+    lab = _lab(image)
     m = _region_means(labels, lab)
     m2 = _region_means(labels, lab * lab)
     return np.sqrt(np.maximum(m2 - m * m, 0)), ["L std", "a std", "b std"]
@@ -278,11 +287,16 @@ def _f_hsv_mean(image, labels):
     return _region_means(labels, stack), ["hue cos", "hue sin", "saturation", "value"]
 
 
-def _f_centroid(image, labels):
+def _f_x(image, labels):
     h, w = labels.shape
-    yy, xx = np.mgrid[0:h, 0:w]
-    xy = np.dstack([xx / max(1, w - 1), yy / max(1, h - 1)])
-    return _region_means(labels, xy), ["x centroid", "y centroid"]
+    xx = np.broadcast_to(np.arange(w) / max(1, w - 1), (h, w))
+    return _region_means(labels, xx), ["x centroid"]
+
+
+def _f_y(image, labels):
+    h, w = labels.shape
+    yy = np.broadcast_to((np.arange(h) / max(1, h - 1))[:, None], (h, w))
+    return _region_means(labels, yy), ["y centroid"]
 
 
 def _f_extent(image, labels):
@@ -353,61 +367,81 @@ def _f_gradient(image, labels):
     return np.hstack([m, np.sqrt(np.maximum(m2 - m * m, 0))]), ["grad mean", "grad std"]
 
 
-def _f_shape(image, labels):
-    """log area (region sizes are heavy-tailed) and bounding-box aspect."""
+def _f_area(image, labels):
+    """log area, since region sizes are heavy-tailed."""
     h, w = labels.shape
     n = int(labels.max()) + 1
     area = np.bincount(labels.ravel(), minlength=n).astype(np.float64)
+    return np.log(np.maximum(area, 1) / (h * w))[:, None], ["log area"]
+
+
+def _f_aspect(image, labels):
+    """log(bbox width / height): 0 is square, + wide, - tall."""
+    n = int(labels.max()) + 1
     aspect = np.zeros(n)
     for r, sl in enumerate(ndimage.find_objects(labels + 1, max_label=n)):
         if sl is not None:
             aspect[r] = np.log((sl[1].stop - sl[1].start) / (sl[0].stop - sl[0].start))
-    return np.stack([np.log(np.maximum(area, 1) / (h * w)), aspect], axis=1), ["log area", "log aspect"]
+    return aspect[:, None], ["log aspect"]
 
 
-# (key, label, group, fn) -- order is the bit order of the "features" mask
+# (key, label, group, fn, default weight).  Each entry gets its own weight
+# slider, param "w_<key>"; weight 0 leaves it out entirely.
 FEATURES = [
-    ("lab_mean", "Lab mean", "colour", _f_lab_mean),
-    ("lab_std", "Lab std", "colour", _f_lab_std),
-    ("hsv_mean", "HSV mean", "colour", _f_hsv_mean),
-    ("centroid", "Centroid", "position", _f_centroid),
-    ("extent", "Extent", "position", _f_extent),
-    ("lbp", "LBP", "texture", _f_lbp),
-    ("gabor", "Gabor", "texture", _f_gabor),
-    ("gradient", "Gradient", "texture", _f_gradient),
-    ("shape", "Area / aspect", "shape", _f_shape),
+    ("lightness", "Lightness (L)", "colour", _f_lightness, 1.0),
+    ("chroma", "Chroma (a, b)", "colour", _f_chroma, 1.0),
+    ("lab_std", "Lab std", "colour", _f_lab_std, 0.0),
+    ("hsv", "HSV mean", "colour", _f_hsv_mean, 0.0),
+    ("x", "x centroid", "position", _f_x, 1.0),
+    ("y", "y centroid", "position", _f_y, 1.0),
+    ("extent", "Extent (p10/p90)", "position", _f_extent, 0.0),
+    ("lbp", "LBP histogram", "texture", _f_lbp, 1.0),
+    ("gabor", "Gabor energy", "texture", _f_gabor, 0.0),
+    ("gradient", "Gradient mean/std", "texture", _f_gradient, 0.0),
+    ("area", "Area", "shape", _f_area, 0.0),
+    ("aspect", "Aspect ratio", "shape", _f_aspect, 0.0),
 ]
-FEATURE_GROUPS = ["colour", "position", "texture", "shape"]
+_FEATURE_INDEX = {f[0]: i for i, f in enumerate(FEATURES)}
+
+# Raw columns per feature for the current (base, labels) pair, so dragging a
+# weight rescales cached numbers instead of re-running Gabor filters.
+_feature_memo = {"base": None, "labels": None, "raw": {}}
 
 
-def _group_bits(group):
-    return sum(1 << i for i, f in enumerate(FEATURES) if f[2] == group)
+def raw_feature(image, labels, key):
+    """Unweighted (n_regions, width) columns for one feature, plus names."""
+    if _feature_memo["base"] is not image or _feature_memo["labels"] is not labels:
+        _feature_memo.update(base=image, labels=labels, raw={})
+    if key not in _feature_memo["raw"]:
+        raw, names = FEATURES[_FEATURE_INDEX[key]][3](image, labels)
+        _feature_memo["raw"][key] = (np.asarray(raw, dtype=np.float64), names)
+    return _feature_memo["raw"][key]
 
 
-def region_features(image, labels, features=0b101001, w_colour=1.0, w_position=1.0,
-                    w_texture=1.0, w_shape=1.0):
+def _zscore(raw):
+    std = raw.std(axis=0)
+    return (raw - raw.mean(axis=0)) / np.where(std > 1e-12, std, 1.0)
+
+
+def region_features(image, labels, weights):
     """Per-region feature matrix, standardised and weighted.
 
-    `features` is a bitmask over FEATURES.  Each column is z-scored across
-    regions, then every selected feature's block is divided by sqrt(its
-    width), so each feature contributes the same total variance whether it is
-    2 numbers or 10 -- otherwise the 10 LBP bins would outvote 3 Lab channels.
-    Finally each block is multiplied by its group weight, so in a squared
-    Euclidean distance a feature counts weight² times.
+    `weights` maps FEATURES keys to weights; missing or 0 means left out.
+    Each column is z-scored across regions, then each feature's block is
+    divided by sqrt(its width), so at weight 1 every feature contributes the
+    same total variance whether it is 1 number or 10 -- otherwise the 10 LBP
+    bins would outvote lightness.  The block is then multiplied by its
+    weight, so in a squared Euclidean distance a feature counts weight² times.
 
     Returns (X, names, groups) with X of shape (n_regions, d).
     """
-    weights = {"colour": w_colour, "position": w_position,
-               "texture": w_texture, "shape": w_shape}
     blocks, names, groups = [], [], []
-    for i, (key, label, group, fn) in enumerate(FEATURES):
-        if not int(features) >> i & 1:
+    for key, label, group, fn, _ in FEATURES:
+        w = float(weights.get(key, 0.0))
+        if w <= 0:
             continue
-        raw, cols = fn(image, labels)
-        raw = np.asarray(raw, dtype=np.float64)
-        std = raw.std(axis=0)
-        z = (raw - raw.mean(axis=0)) / np.where(std > 1e-12, std, 1.0)
-        blocks.append(z * (float(weights[group]) / np.sqrt(raw.shape[1])))
+        raw, cols = raw_feature(image, labels, key)
+        blocks.append(_zscore(raw) * (w / np.sqrt(raw.shape[1])))
         names += cols
         groups += [group] * len(cols)
     n = int(labels.max()) + 1
@@ -442,31 +476,45 @@ def feature_pca(X, k=3):
     return out, ratio
 
 
+def feature_map(image, labels, key):
+    """One value per region for a single feature: the column itself if it has
+    one, else its first principal component.  Returns (values, readout)."""
+    raw, names = raw_feature(image, labels, key)
+    z = _zscore(raw)
+    if z.shape[1] == 1:
+        return z[:, 0], names[0]
+    pc, ratio = feature_pca(z, 1)
+    return pc[:, 0], "PC1 of %d cols (%.0f%% of its variance)" % (z.shape[1], 100 * ratio[0])
+
+
 _EDGE_BGR = (30, 30, 30)
 
 
-def extract_features(state, features=0b101001, w_colour=1.0, w_position=1.0,
-                     w_texture=1.0, w_shape=1.0, display=0, feature_index=0):
+def extract_features(state, display=0, focus=0, **weights):
     """Region features, measured on the image SLIC segmented.
 
-    display 0 paints each region by its first three principal components as
-    RGB -- regions that look alike under the chosen features get similar
-    colours.  display 1 paints one feature column as a heatmap.
+    Weights arrive as w_<key> keyword arguments, one per FEATURES entry.
+    display 0 paints each region by the first three principal components of
+    the weighted matrix as RGB -- regions that look alike under the current
+    weights get similar colours.  display 1 paints feature number `focus` as
+    a heatmap, whatever its weight, so a feature can be previewed before it
+    is switched on.
     """
     labels = state.get("labels")
     if labels is None:
         raise ValueError("needs a SLIC block upstream")
-    X, names, groups = region_features(state["base"], labels, features,
-                                       w_colour, w_position, w_texture, w_shape)
+    w = {key: weights.get("w_" + key, 0.0) for key, *_ in FEATURES}
+    X, names, groups = region_features(state["base"], labels, w)
     if X.shape[1] == 0:
-        raise ValueError("select at least one feature")
+        raise ValueError("every weight is 0 -- raise at least one")
     if int(display) == 0:
         pcs, _ = feature_pca(X, 3)
         rgb = np.stack([_stretch(pcs[:, c]) for c in range(3)], axis=1)
         region_bgr = rgb[:, ::-1].astype(np.uint8)
     else:
-        col = X[:, int(feature_index) % X.shape[1]]
-        grey = _stretch(col).astype(np.uint8).reshape(-1, 1)
+        key = FEATURES[int(focus) % len(FEATURES)][0]
+        values, _ = feature_map(state["base"], labels, key)
+        grey = _stretch(values).astype(np.uint8).reshape(-1, 1)
         region_bgr = cv2.applyColorMap(grey, cv2.COLORMAP_VIRIDIS).reshape(-1, 3)
     shown = draw_boundaries(region_bgr[labels], labels, _EDGE_BGR)
     return {**state, "image": shown, "features": X, "feature_names": names,
@@ -477,14 +525,14 @@ def _describe_features(p, before, after):
     X = after.get("features")
     if X is None:
         return None
-    text = "%d regions × %d features" % X.shape
+    text = "%d regions × %d cols" % X.shape
     if int(p["display"]) == 0:
         _, ratio = feature_pca(X, 3)
-        text += "  ·  PC1-3 explain %.0f%%" % (100 * ratio.sum())
-    elif X.shape[1]:
-        i = int(p["feature_index"]) % X.shape[1]
-        text += "  ·  showing #%d %s" % (i, after["feature_names"][i])
-    return text
+        return text + "  ·  PC1-3 explain %.0f%%" % (100 * ratio.sum())
+    key, label = FEATURES[int(p["focus"]) % len(FEATURES)][:2]
+    _, what = feature_map(after["base"], after["labels"], key)
+    off = "  ·  weight 0, not clustered" if float(p.get("w_" + key, 0)) <= 0 else ""
+    return "%s  ·  map: %s, %s (low → high: purple → yellow)%s" % (text, label, what, off)
 
 
 # --------------------------------------------------------------------------
@@ -723,15 +771,17 @@ def _describe_gaussian(p, before, after):
 # registry -- drives the UI
 # --------------------------------------------------------------------------
 # param spec: (key, label, min, max, step, default)
-# a "choices" entry turns the control into a segmented button group instead;
-# a "multi" entry into toggle chips whose value is a bitmask.
-# "when": {key: value} shows a param only while another has that value;
-# {key: {"bits": mask}} while a bitmask param has any of those bits set.
+# a "choices" entry turns the control into a segmented button group instead.
+# "when": {key: value} shows a param only while another has that value.
+# "group" puts a small heading above the first param of each run.
+# "hidden" params are set by the UI, never shown as controls.
+# "on_touch": {key: value} is applied when the control is pressed or moved.
 
-def _weight(group, default=1.0):
-    return {"key": "w_" + group, "label": group.capitalize() + " weight", "min": 0,
-            "max": 3, "step": 0.05, "default": default,
-            "when": {"features": {"bits": _group_bits(group)}}}
+def _weight_params():
+    return [{"key": "w_" + key, "label": label, "group": group, "min": 0, "max": 3,
+             "step": 0.05, "default": default,
+             "on_touch": {"display": 1, "focus": i}}
+            for i, (key, label, group, _, default) in enumerate(FEATURES)]
 
 
 OPERATIONS = {
@@ -754,19 +804,15 @@ OPERATIONS = {
     },
     "features": {
         "label": "Region Features",
-        "hint": "Per-superpixel features, z-scored and balanced so each counts equally; weights scale whole groups. Measured on SLIC's input.",
+        "hint": "Per-superpixel features, z-scored so each counts equally at weight 1; 0 leaves it out. Touch a slider to see that feature's map. Measured on SLIC's input.",
         "fn": extract_features,
         "state": True,
         "describe": _describe_features,
         "params": [
-            {"key": "features", "label": "Features", "multi": [f[1] for f in FEATURES],
-             "groups": [f[2] for f in FEATURES], "default": (1 << 0) | (1 << 3) | (1 << 5)},
-            _weight("colour"),
-            _weight("position"),
-            _weight("texture"),
-            _weight("shape"),
-            {"key": "display", "label": "Show", "choices": ["PCA → RGB", "One feature"], "default": 0},
-            {"key": "feature_index", "label": "Feature #", "min": 0, "max": 40, "step": 1, "default": 0, "when": {"display": 1}},
+            {"key": "display", "label": "Show", "choices": ["PCA → RGB", "Feature map"], "default": 0},
+            *_weight_params(),
+            {"key": "focus", "label": "Mapped feature", "min": 0, "max": len(FEATURES) - 1,
+             "step": 1, "default": 0, "hidden": True},
         ],
     },
     "kmeans": {
